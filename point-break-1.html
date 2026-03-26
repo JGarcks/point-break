@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Point Break</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#000; overflow:hidden; width:100vw; height:100vh; }
+  #rotate {
+    display:none; position:fixed; inset:0;
+    background:#0a1628; color:#fff;
+    font:22px Georgia,serif; line-height:2.2;
+    justify-content:center; align-items:center;
+    text-align:center; z-index:99; padding:30px;
+  }
+  #menu {
+    position:fixed; inset:0;
+    display:flex; flex-direction:column;
+    justify-content:center; align-items:center;
+    pointer-events:none; z-index:10;
+    transition: opacity 1.2s ease;
+  }
+  #menu h1 {
+    font:bold 72px Georgia,serif; color:#fff;
+    text-shadow: 0 0 40px rgba(0,120,255,0.8), 0 2px 8px rgba(0,0,0,0.6);
+    letter-spacing: 6px;
+  }
+  #menu p {
+    font:24px Georgia,serif; color:rgba(255,238,190,0.9);
+    margin-top:16px;
+  }
+  #menu .tap {
+    font:18px Georgia,serif; color:rgba(255,255,255,0.7);
+    margin-top:32px; animation: pulse 2s ease-in-out infinite;
+  }
+  #hint {
+    position:fixed; bottom:40px; left:50%; transform:translateX(-50%);
+    font:16px Georgia,serif; color:rgba(255,255,255,0.55);
+    pointer-events:none; z-index:10;
+    animation: pulse 2s ease-in-out infinite;
+    transition: opacity 2s;
+  }
+  @keyframes pulse { 0%,100%{opacity:0.4} 50%{opacity:1} }
+  @media (orientation:portrait) {
+    #rotate { display:flex !important; }
+    canvas, #menu, #hint { display:none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div id="rotate">🏄 Point Break<br>Rotate to landscape to surf</div>
+
+<div id="menu">
+  <h1>POINT BREAK</h1>
+  <p>a surfing journey</p>
+  <div class="tap">tap to drop in</div>
+</div>
+
+<div id="hint">drag to carve &nbsp;·&nbsp; tilt to lean</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { Water } from 'three/addons/objects/Water.js';
+import { Sky }   from 'three/addons/objects/Sky.js';
+
+// ─── Renderer ────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.5;
+document.body.appendChild(renderer.domElement);
+
+// ─── Scene ───────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x87ceeb, 0.00035);
+
+// ─── Camera — positioned at board level, looking down the line ───────────────
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 20000);
+// Eye height of a surfer: ~0.4m above water, looking slightly down the line
+camera.position.set(0, 1.4, 0);
+camera.rotation.order = 'YXZ';
+camera.rotation.y = -0.3;  // angled slightly toward the wave face
+
+// ─── Water ───────────────────────────────────────────────────────────────────
+const waterGeometry = new THREE.PlaneGeometry(20000, 20000, 8, 8);
+const water = new Water(waterGeometry, {
+  textureWidth:  512,
+  textureHeight: 512,
+  waterNormals: new THREE.TextureLoader().load(
+    'https://threejs.org/examples/textures/waternormals.jpg',
+    tex => { tex.wrapS = tex.wrapT = THREE.RepeatWrapping; }
+  ),
+  sunDirection: new THREE.Vector3(),
+  sunColor:    0xffffff,
+  waterColor:  0x006994,
+  distortionScale: 4.5,
+  fog: true,
+  alpha: 1.0,
+});
+water.rotation.x = -Math.PI / 2;
+scene.add(water);
+
+// ─── Sky ─────────────────────────────────────────────────────────────────────
+const sky = new Sky();
+sky.scale.setScalar(10000);
+scene.add(sky);
+
+const skyUniforms = sky.material.uniforms;
+skyUniforms['turbidity'].value      = 8;
+skyUniforms['rayleigh'].value       = 2;
+skyUniforms['mieCoefficient'].value = 0.005;
+skyUniforms['mieDirectionalG'].value= 0.85;
+
+const sun = new THREE.Vector3();
+const pmrem = new THREE.PMREMGenerator(renderer);
+
+// Sun position parameters — will animate through day cycle
+let sunElevation = 8;   // degrees above horizon
+let sunAzimuth   = 160; // degrees
+
+function updateSun() {
+  const phi   = THREE.MathUtils.degToRad(90 - sunElevation);
+  const theta = THREE.MathUtils.degToRad(sunAzimuth);
+  sun.setFromSphericalCoords(1, phi, theta);
+  sky.material.uniforms['sunPosition'].value.copy(sun);
+  water.material.uniforms['sunDirection'].value.copy(sun).normalize();
+  const envScene = new THREE.Scene();
+  envScene.add(sky.clone());
+  scene.environment = pmrem.fromScene(envScene).texture;
+  // Adjust exposure and fog for time of day
+  const el = sunElevation;
+  if (el < 5) {
+    renderer.toneMappingExposure = 0.18;
+    scene.fog.color.setHex(0x1a1a3e);
+    water.material.uniforms['waterColor'].value.setHex(0x001030);
+  } else if (el < 20) {
+    renderer.toneMappingExposure = 0.35;
+    scene.fog.color.setHex(0xff8844);
+    water.material.uniforms['waterColor'].value.setHex(0x003366);
+  } else if (el < 60) {
+    renderer.toneMappingExposure = 0.55;
+    scene.fog.color.setHex(0x87ceeb);
+    water.material.uniforms['waterColor'].value.setHex(0x006994);
+  } else {
+    renderer.toneMappingExposure = 0.5;
+    scene.fog.color.setHex(0x6ab4d8);
+    water.material.uniforms['waterColor'].value.setHex(0x005580);
+  }
+}
+updateSun();
+
+// ─── Wave geometry — a large swell shape on the left ─────────────────────────
+// We add a procedural wave mesh that rises up on the left side —
+// this gives the sense of a peeling wave face beside you
+
+const waveRes = 60;
+const waveGeo = new THREE.PlaneGeometry(80, 200, waveRes, waveRes);
+waveGeo.rotateX(-Math.PI / 2);
+
+// Displace vertices to create a wave wall shape
+const posArr = waveGeo.attributes.position.array;
+for (let i = 0; i < posArr.length; i += 3) {
+  const x = posArr[i];
+  const z = posArr[i+2];
+  // Wave is a curved wall — rises steeply on the left (negative x)
+  const wallFactor = Math.max(0, -x / 30);
+  const heightProfile = Math.pow(wallFactor, 1.4) * 14;
+  // Add some organic shape along z
+  const zVariation = Math.sin(z * 0.04) * 1.5 + Math.sin(z * 0.09) * 0.8;
+  posArr[i+1] = heightProfile + zVariation * wallFactor;
+}
+waveGeo.computeVertexNormals();
+waveGeo.attributes.position.needsUpdate = true;
+
+const waveMat = new THREE.MeshPhysicalMaterial({
+  color:       0x006699,
+  transparent: true,
+  opacity:     0.88,
+  roughness:   0.1,
+  metalness:   0.0,
+  transmission:0.4,
+  thickness:   2.0,
+  side: THREE.DoubleSide,
+});
+const waveMesh = new THREE.Mesh(waveGeo, waveMat);
+waveMesh.position.set(-18, 0, -20);
+scene.add(waveMesh);
+
+// Wave lip — white foam curling over the top
+const lipGeo = new THREE.TorusGeometry(3, 0.6, 8, 60, Math.PI * 0.7);
+const lipMat = new THREE.MeshStandardMaterial({
+  color: 0xffffff,
+  transparent: true,
+  opacity: 0.85,
+  roughness: 1.0,
+});
+const lipMesh = new THREE.Mesh(lipGeo, lipMat);
+lipMesh.position.set(-24, 13, -20);
+lipMesh.rotation.z = -Math.PI * 0.1;
+lipMesh.rotation.y = Math.PI * 0.15;
+scene.add(lipMesh);
+
+// ─── Foam / whitewater spray particles ───────────────────────────────────────
+const sprayCount = 300;
+const sprayGeo   = new THREE.BufferGeometry();
+const sprayPos   = new Float32Array(sprayCount * 3);
+const sprayVel   = new Float32Array(sprayCount * 3);
+const sprayLife  = new Float32Array(sprayCount);
+
+function resetSpray(i) {
+  // Spawn near the lip
+  sprayPos[i*3]   = -20 + (Math.random()-0.5)*10;
+  sprayPos[i*3+1] = 10  + Math.random()*4;
+  sprayPos[i*3+2] = -15 + (Math.random()-0.5)*30;
+  sprayVel[i*3]   = (Math.random()-0.3)*0.08;
+  sprayVel[i*3+1] = Math.random()*0.06;
+  sprayVel[i*3+2] = Math.random()*0.1;
+  sprayLife[i]    = Math.random();
+}
+for (let i=0; i<sprayCount; i++) resetSpray(i);
+
+sprayGeo.setAttribute('position', new THREE.BufferAttribute(sprayPos, 3));
+const sprayMat = new THREE.PointsMaterial({
+  color: 0xffffff,
+  size: 0.25,
+  transparent: true,
+  opacity: 0.7,
+  sizeAttenuation: true,
+  depthWrite: false,
+});
+const sprayMesh = new THREE.Points(sprayGeo, sprayMat);
+scene.add(sprayMesh);
+
+// ─── Ambient & directional light ─────────────────────────────────────────────
+const ambientLight = new THREE.AmbientLight(0x404060, 0.6);
+scene.add(ambientLight);
+const dirLight = new THREE.DirectionalLight(0xfff4e0, 1.2);
+dirLight.position.set(100, 80, 50);
+scene.add(dirLight);
+
+// ─── Input & camera sway ─────────────────────────────────────────────────────
+let started   = false;
+let leanTarget = 0, leanCurrent = 0;
+let touchSX = null;
+let camSwayX = 0, camSwayY = 0, camSwayVX = 0, camSwayVY = 0;
+
+const menuEl = document.getElementById('menu');
+const hintEl = document.getElementById('hint');
+
+function start() {
+  if (started) return;
+  started = true;
+  menuEl.style.opacity = '0';
+  setTimeout(() => menuEl.style.display = 'none', 1200);
+}
+
+renderer.domElement.addEventListener('touchstart', e => {
+  touchSX = e.touches[0].clientX; start();
+}, {passive:true});
+renderer.domElement.addEventListener('touchmove', e => {
+  if (touchSX !== null) {
+    leanTarget = Math.max(-1, Math.min(1, (e.touches[0].clientX - touchSX) / 140));
+  }
+}, {passive:true});
+renderer.domElement.addEventListener('touchend', () => {
+  touchSX = null; leanTarget *= 0.15;
+});
+renderer.domElement.addEventListener('mousedown', e => { touchSX = e.clientX; start(); });
+renderer.domElement.addEventListener('mousemove', e => {
+  if (touchSX !== null)
+    leanTarget = Math.max(-1, Math.min(1, (e.clientX - window.innerWidth/2) / (window.innerWidth/2) * 1.3));
+});
+renderer.domElement.addEventListener('mouseup', () => { touchSX = null; leanTarget *= 0.15; });
+window.addEventListener('deviceorientation', e => {
+  if (e.gamma !== null) leanTarget = Math.max(-1, Math.min(1, e.gamma / 28));
+});
+
+// ─── Resize ───────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─── Day cycle ────────────────────────────────────────────────────────────────
+// Full day cycle over 8 minutes
+let dayT = 0;
+function updateDayCycle(dt) {
+  dayT += dt * (360 / 480); // 480s = 8min full cycle
+  // Map to elevation: sunrise → noon → sunset → night
+  sunElevation = Math.sin(THREE.MathUtils.degToRad(dayT)) * 45 + 10;
+  sunAzimuth   = 160 + dayT * 0.5;
+  updateSun();
+}
+
+// ─── Animate ─────────────────────────────────────────────────────────────────
+let last = performance.now();
+let elapsed = 0;
+let hintFaded = false;
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const now = performance.now();
+  const dt  = Math.min((now - last) / 1000, 0.05);
+  last = now;
+
+  if (!started) { renderer.render(scene, camera); return; }
+
+  elapsed += dt;
+
+  // Fade hint after 8s
+  if (elapsed > 8 && !hintFaded) {
+    hintEl.style.opacity = '0'; hintFaded = true;
+  }
+
+  // Day cycle (every 60s nudge sun)
+  if (Math.floor(elapsed) % 20 === 0 && dt < 0.02) updateDayCycle(20);
+
+  // Water animation
+  water.material.uniforms['time'].value += dt * 0.6;
+
+  // ── Camera organic sway — feels like balancing on a board ──
+  leanCurrent += (leanTarget - leanCurrent) * 0.05;
+  const tx = Math.sin(elapsed*0.22)*0.06 + Math.sin(elapsed*0.37)*0.03 + leanCurrent*0.18;
+  const ty = Math.sin(elapsed*0.28)*0.025 + Math.sin(elapsed*0.17)*0.015;
+  camSwayVX += (tx - camSwayX) * 0.018; camSwayVX *= 0.88;
+  camSwayVY += (ty - camSwayY) * 0.018; camSwayVY *= 0.88;
+  camSwayX  += camSwayVX;
+  camSwayY  += camSwayVY;
+
+  // Camera: board-level, looking down the line
+  // Slightly to the right of wave face, pitched very slightly down
+  camera.position.set(
+    camSwayX * 3,
+    1.4 + camSwayY * 2,
+    camSwayX * 1.5
+  );
+  camera.rotation.x = -0.04 + camSwayY * 0.3;
+  camera.rotation.y = -0.28 + camSwayX * 0.4;
+  camera.rotation.z = leanCurrent * 0.08 + camSwayX * 0.15;
+
+  // ── Wave face animation — the wave slowly peels past ──
+  waveMesh.position.z = -20 + Math.sin(elapsed*0.18)*3;
+  // Breathe the wave — slight pulsing height
+  const breathe = 1 + Math.sin(elapsed*0.35)*0.04;
+  waveMesh.scale.y = breathe;
+  lipMesh.scale.y  = breathe;
+  lipMesh.position.y = 13 * breathe;
+
+  // Lip rotation — the curl
+  lipMesh.rotation.z = -Math.PI*0.1 + Math.sin(elapsed*0.4)*0.08;
+
+  // ── Spray particles ──
+  const pa = sprayGeo.attributes.position.array;
+  for (let i=0; i<sprayCount; i++) {
+    sprayLife[i] -= dt * 0.4;
+    if (sprayLife[i] <= 0) { resetSpray(i); continue; }
+    pa[i*3]   += sprayVel[i*3];
+    pa[i*3+1] += sprayVel[i*3+1] - dt*0.04; // gravity
+    pa[i*3+2] += sprayVel[i*3+2];
+  }
+  sprayGeo.attributes.position.needsUpdate = true;
+  sprayMat.opacity = 0.55 + Math.sin(elapsed*1.2)*0.15;
+
+  renderer.render(scene, camera);
+}
+
+animate();
+</script>
+</body>
+</html>
