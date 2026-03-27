@@ -6,279 +6,807 @@
 <title>Point Break</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:#0a1628; overflow:hidden; width:100vw; height:100vh; font-family: Georgia, serif; }
+  body { background:#0a1628; overflow:hidden; width:100vw; height:100vh; font-family: Georgia, serif; touch-action:none; }
   #rotate {
     display:none; position:fixed; inset:0; background:#0a1628; color:#fff;
-    font-size:22px; line-height:2.2; justify-content:center; align-items:center;
+    font-size:22px; line-height:2.4; justify-content:center; align-items:center;
     text-align:center; z-index:99; padding:30px;
   }
   #hud { position:fixed; top:0; left:0; right:0; display:flex; justify-content:space-between;
     align-items:flex-start; padding:24px 32px; pointer-events:none; z-index:5; }
-  .hud-score { font-size:32px; color:rgba(255,255,255,0.9);
-    text-shadow: 0 0 20px rgba(0,200,255,0.5); letter-spacing:2px; }
+  .hud-score { font-size:32px; color:rgba(255,255,255,0.95);
+    text-shadow: 0 0 20px rgba(0,200,255,0.6); letter-spacing:2px; }
   .hud-time { font-size:16px; color:rgba(255,255,255,0.5); letter-spacing:3px; margin-top:6px; }
+  #barrel-flash { position:fixed; inset:0; pointer-events:none; z-index:4;
+    background: radial-gradient(ellipse at center, rgba(0,180,255,0.15) 0%, transparent 70%);
+    opacity:0; transition: opacity 0.3s; }
   #hint { position:fixed; bottom:36px; left:50%; transform:translateX(-50%);
     font-size:14px; color:rgba(255,255,255,0.4); pointer-events:none; z-index:10;
     letter-spacing:3px; animation: pulse 2.5s ease-in-out infinite;
     transition: opacity 2s; white-space:nowrap; }
   @keyframes pulse { 0%,100%{opacity:0.3} 50%{opacity:0.9} }
+  #barrel-indicator { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    font-size:28px; color:rgba(255,255,255,0); letter-spacing:6px; pointer-events:none;
+    z-index:6; transition: color 0.2s; text-shadow: 0 0 30px rgba(0,220,255,1); }
   @media (orientation:portrait) {
     #rotate { display:flex !important; }
-    canvas, #hint, #hud { display:none !important; }
+    canvas, #hint, #hud, #barrel-flash, #barrel-indicator { display:none !important; }
   }
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
-<div id="rotate">🏄‍♂️ POINT BREAK<br><span style="font-size:16px;opacity:0.7">rotate to landscape to surf</span></div>
+<div id="rotate">🏄 POINT BREAK<br><span style="font-size:16px;opacity:0.6">rotate to landscape to surf</span></div>
 <div id="hud">
   <div>
     <div class="hud-score" id="score">0</div>
     <div class="hud-time" id="timer">0:00</div>
   </div>
+  <div style="text-align:right">
+    <div class="hud-score" id="combo" style="font-size:18px;color:rgba(0,220,255,0.8);"></div>
+  </div>
 </div>
-<div id="hint">drag to carve &nbsp;·&nbsp; tilt to lean</div>
+<div id="barrel-flash"></div>
+<div id="barrel-indicator" id="barrel-indicator">BARREL</div>
+<div id="hint">drag to carve &nbsp;·&nbsp; ride the barrel</div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+// ─── RENDERER ───────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.8;
+renderer.toneMappingExposure = 1.1;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
-
-// Prevent text selection on touch
-renderer.domElement.style.userSelect = 'none';
-renderer.domElement.style.webkitUserSelect = 'none';
 renderer.domElement.style.touchAction = 'none';
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x87ceeb, 80, 300);
+scene.fog = new THREE.FogExp2(0x87ceeb, 0.008);
 
-const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.1, 2000);
-camera.position.set(0, 3.5, 12);
-camera.lookAt(0, 1, -20);
+const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 2000);
 
-// Sky
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+// ─── SKY ────────────────────────────────────────────────────────────────────
 scene.background = new THREE.Color(0x87ceeb);
 
-// Ocean
-const oceanGeo = new THREE.PlaneGeometry(400, 600, 80, 120);
-oceanGeo.rotateX(-Math.PI/2);
-const oceanBase = new Float32Array(oceanGeo.attributes.position.array);
-const oceanMat = new THREE.MeshPhongMaterial({ color:0x0077aa, specular:0x88ddff, shininess:120, transparent:true, opacity:0.92 });
+// Sky gradient via large sphere
+const skyGeo = new THREE.SphereGeometry(800, 16, 8);
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    varying vec3 vPos;
+    void main() { vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+  `,
+  fragmentShader: `
+    varying vec3 vPos;
+    uniform float uTime;
+    void main() {
+      float h = normalize(vPos).y;
+      vec3 zenith = vec3(0.08, 0.28, 0.65);
+      vec3 horizon = vec3(0.55, 0.78, 0.95);
+      vec3 sun = vec3(1.0, 0.85, 0.5);
+      float sunHeight = 0.25 + sin(uTime*0.03)*0.05;
+      vec3 sky = mix(horizon, zenith, max(h,0.0));
+      // sun glow near horizon
+      float sunGlow = max(0.0, 1.0 - abs(h - sunHeight)*8.0);
+      sky = mix(sky, sun, pow(sunGlow,3.0)*0.5);
+      // clouds
+      gl_FragColor = vec4(sky, 1.0);
+    }
+  `
+});
+scene.add(new THREE.Mesh(skyGeo, skyMat));
+
+// ─── LIGHTING ───────────────────────────────────────────────────────────────
+const ambientLight = new THREE.AmbientLight(0x88aacc, 0.6);
+scene.add(ambientLight);
+
+const sunLight = new THREE.DirectionalLight(0xfff4e0, 2.0);
+sunLight.position.set(60, 120, -40);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(1024, 1024);
+sunLight.shadow.camera.near = 0.5;
+sunLight.shadow.camera.far = 300;
+sunLight.shadow.camera.left = -50;
+sunLight.shadow.camera.right = 50;
+sunLight.shadow.camera.top = 50;
+sunLight.shadow.camera.bottom = -50;
+scene.add(sunLight);
+
+const rimLight = new THREE.DirectionalLight(0x00aaff, 1.2);
+rimLight.position.set(-20, 10, -15);
+scene.add(rimLight);
+
+const fillLight = new THREE.DirectionalLight(0x4488ff, 0.4);
+fillLight.position.set(0, -5, 10);
+scene.add(fillLight);
+
+// ─── GERSTNER WAVE OCEAN ────────────────────────────────────────────────────
+// Uses custom GLSL shader with multiple Gerstner waves for realistic ocean surface
+const OCEAN_SIZE = 400;
+const OCEAN_SEGS = 128;
+
+const gerstnerUniforms = {
+  uTime: { value: 0 },
+  uDeepColor: { value: new THREE.Color(0x003366) },
+  uShallowColor: { value: new THREE.Color(0x0077aa) },
+  uFoamColor: { value: new THREE.Color(0xffffff) },
+  uSunDir: { value: new THREE.Vector3(0.5, 0.8, -0.3).normalize() },
+  uCameraPos: { value: new THREE.Vector3() },
+};
+
+const oceanMat = new THREE.ShaderMaterial({
+  uniforms: gerstnerUniforms,
+  vertexShader: `
+    uniform float uTime;
+    varying vec3 vWorldPos;
+    varying vec3 vNormal;
+    varying float vHeight;
+    varying float vFoam;
+
+    // Gerstner wave function
+    vec3 gerstner(vec2 pos, vec2 dir, float amplitude, float wavelength, float speed, float steepness, inout vec3 normal) {
+      float k = 2.0 * 3.14159 / wavelength;
+      float c = sqrt(9.81 / k);
+      float f = k * (dot(dir, pos) - c * speed * uTime);
+      float Q = steepness / (k * amplitude);
+      normal.x -= dir.x * k * amplitude * sin(f);
+      normal.z -= dir.y * k * amplitude * sin(f);
+      normal.y -= Q * k * amplitude * cos(f);
+      return vec3(
+        Q * amplitude * dir.x * cos(f),
+        amplitude * sin(f),
+        Q * amplitude * dir.y * cos(f)
+      );
+    }
+
+    void main() {
+      vec3 pos = position;
+      vec3 normal = vec3(0.0, 1.0, 0.0);
+
+      // Multiple Gerstner waves for complex ocean surface
+      pos += gerstner(pos.xz, normalize(vec2(1.0, 0.8)), 1.8, 35.0, 1.0, 0.6, normal);
+      pos += gerstner(pos.xz, normalize(vec2(-0.5, 1.0)), 1.1, 22.0, 1.2, 0.5, normal);
+      pos += gerstner(pos.xz, normalize(vec2(0.3, -0.7)), 0.7, 14.0, 1.5, 0.4, normal);
+      pos += gerstner(pos.xz, normalize(vec2(-0.8, 0.4)), 0.4, 9.0, 1.8, 0.3, normal);
+      pos += gerstner(pos.xz, normalize(vec2(0.6, 0.6)), 0.25, 5.0, 2.0, 0.25, normal);
+
+      vHeight = pos.y;
+      vFoam = max(0.0, (pos.y - 1.2) / 1.5);
+      vWorldPos = (modelMatrix * vec4(pos, 1.0)).xyz;
+      vNormal = normalize(normalMatrix * normal);
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uDeepColor;
+    uniform vec3 uShallowColor;
+    uniform vec3 uFoamColor;
+    uniform vec3 uSunDir;
+    uniform vec3 uCameraPos;
+    varying vec3 vWorldPos;
+    varying vec3 vNormal;
+    varying float vHeight;
+    varying float vFoam;
+
+    void main() {
+      vec3 N = normalize(vNormal);
+      vec3 V = normalize(uCameraPos - vWorldPos);
+
+      // Fresnel effect — more reflective at glancing angles
+      float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0);
+
+      // Base water color — deeper = darker blue
+      float depth = clamp((vHeight + 2.0) / 4.0, 0.0, 1.0);
+      vec3 waterColor = mix(uDeepColor, uShallowColor, depth);
+
+      // Subsurface scattering — crests glow teal/cyan
+      float sss = pow(max(vHeight / 2.5, 0.0), 2.0);
+      waterColor = mix(waterColor, vec3(0.0, 0.8, 0.7), sss * 0.5);
+
+      // Specular highlight from sun
+      vec3 H = normalize(uSunDir + V);
+      float spec = pow(max(dot(N, H), 0.0), 120.0);
+      vec3 specColor = vec3(1.0, 0.97, 0.9) * spec * 2.5;
+
+      // Diffuse
+      float diff = max(dot(N, uSunDir), 0.0);
+      waterColor *= (0.4 + diff * 0.6);
+
+      // Foam on wave crests
+      vec3 finalColor = mix(waterColor, uFoamColor, vFoam * 0.7);
+      finalColor += specColor;
+
+      // Reflection tint at grazing angles
+      vec3 skyRefl = vec3(0.55, 0.78, 0.95);
+      finalColor = mix(finalColor, skyRefl, fresnel * 0.4);
+
+      gl_FragColor = vec4(finalColor, 0.92);
+    }
+  `,
+  transparent: true,
+  side: THREE.FrontSide,
+});
+
+const oceanGeo = new THREE.PlaneGeometry(OCEAN_SIZE, OCEAN_SIZE, OCEAN_SEGS, OCEAN_SEGS);
+oceanGeo.rotateX(-Math.PI / 2);
 const ocean = new THREE.Mesh(oceanGeo, oceanMat);
-ocean.position.set(0, 0, -100);
+ocean.receiveShadow = true;
 scene.add(ocean);
 
-// Wave face
-const waveGeo = new THREE.PlaneGeometry(50, 200, 60, 80);
-const wArr = waveGeo.attributes.position.array;
-for (let i=0; i<wArr.length; i+=3) {
-  const nx = (wArr[i] + 25) / 50;
-  let h;
-  if (nx < 0.3)      h = nx * 4;
-  else if (nx < 0.7) h = 1.2 + (nx-0.3)*6;
-  else               h = 3.6 + Math.pow((nx-0.7)*3,2)*4;
-  wArr[i+1] = h * 6;
-}
-waveGeo.computeVertexNormals();
-waveGeo.rotateX(-Math.PI/2);
-const waveBase = new Float32Array(waveGeo.attributes.position.array);
-const waveMat = new THREE.MeshPhongMaterial({ color:0x0099cc, specular:0xaaeeff, shininess:180, transparent:true, opacity:0.85, side:THREE.DoubleSide });
-const waveMesh = new THREE.Mesh(waveGeo, waveMat);
-waveMesh.position.set(-20, 0, -60);
-scene.add(waveMesh);
+// ─── BREAKING WAVE ──────────────────────────────────────────────────────────
+// A large dedicated breaking wave that peels, curls and barrels
+const waveGroup = new THREE.Group();
+scene.add(waveGroup);
+waveGroup.position.set(-8, 0, -30);
 
-// Lip
-const lipMat = new THREE.MeshPhongMaterial({ color:0xffffff, transparent:true, opacity:0.75, side:THREE.DoubleSide });
-const lipMesh = new THREE.Mesh(new THREE.PlaneGeometry(5, 200, 1, 1), lipMat);
-lipMesh.rotation.x = -Math.PI/2;
-lipMesh.position.set(-29, 22, -60);
-scene.add(lipMesh);
+// Wave face — the main wall of water
+const waveFaceGeo = new THREE.PlaneGeometry(80, 18, 60, 30);
+const waveFaceMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uSunDir: { value: new THREE.Vector3(0.5, 0.8, -0.3).normalize() },
+  },
+  vertexShader: `
+    uniform float uTime;
+    varying vec3 vPos;
+    varying vec3 vNormal;
+    varying float vFoam;
+    void main() {
+      vec3 pos = position;
+      // Wave face deformation — creates the concave face of the wave
+      float t = pos.x / 40.0; // -1 to 1 along wave length
+      float peelProgress = t * 0.5 + 0.5; // where the peel has reached
+      float peel = sin(uTime * 1.2 - pos.x * 0.08) * 0.3 + 0.5;
 
-// Spray
-const sprayCount = 200;
-const sprayGeo = new THREE.BufferGeometry();
-const sprayPos = new Float32Array(sprayCount*3);
-const sprayVel = new Float32Array(sprayCount*3);
+      // Vertical shape — wave is taller in middle, tapers at ends
+      float heightFactor = 1.0 - abs(t) * 0.6;
+      float baseHeight = pos.y * heightFactor;
+
+      // Concave face curvature
+      pos.z += pow(max(pos.y / 9.0, 0.0), 2.0) * 3.0;
+      pos.y = baseHeight + sin(pos.x * 0.05 + uTime * 0.8) * 0.4;
+
+      vFoam = max(0.0, (pos.y - 6.5) / 2.0);
+      vPos = pos;
+      vNormal = normalMatrix * normal;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uSunDir;
+    uniform float uTime;
+    varying vec3 vPos;
+    varying vec3 vNormal;
+    varying float vFoam;
+    void main() {
+      vec3 N = normalize(vNormal);
+      // Deep teal wave face color with SSS
+      vec3 deep = vec3(0.0, 0.25, 0.45);
+      vec3 shallow = vec3(0.0, 0.65, 0.6);
+      float heightT = clamp(vPos.y / 9.0, 0.0, 1.0);
+      vec3 color = mix(deep, shallow, heightT);
+      // Bright teal SSS glow in the lip
+      color = mix(color, vec3(0.1, 0.95, 0.85), vFoam * 0.6);
+      // Foam white at crest
+      color = mix(color, vec3(1.0), vFoam * 0.8);
+      float diff = max(dot(N, uSunDir), 0.2);
+      gl_FragColor = vec4(color * diff, 0.88);
+    }
+  `,
+  transparent: true,
+  side: THREE.DoubleSide,
+});
+const waveFace = new THREE.Mesh(waveFaceGeo, waveFaceMat);
+waveFace.rotation.y = Math.PI / 2;
+waveFace.position.set(0, 4, 0);
+waveGroup.add(waveFace);
+
+// Wave lip — the curling top of the wave
+const lipGeo = new THREE.TorusGeometry(3.5, 1.2, 12, 40, Math.PI * 0.7);
+const lipMat = new THREE.MeshPhysicalMaterial({
+  color: 0x00ddcc,
+  transparent: true,
+  opacity: 0.85,
+  roughness: 0.1,
+  metalness: 0.0,
+  transmission: 0.3,
+});
+const lip = new THREE.Mesh(lipGeo, lipMat);
+lip.rotation.z = Math.PI * 0.1;
+lip.position.set(0, 11.5, 1.5);
+lip.rotation.y = Math.PI / 2;
+waveGroup.add(lip);
+
+// Barrel tunnel — the tube the surfer rides inside
+const barrelGeo = new THREE.CylinderGeometry(4.5, 3.8, 55, 20, 1, true);
+const barrelMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    varying vec2 vUv;
+    varying float vY;
+    void main() {
+      vUv = uv;
+      vY = position.y;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    varying float vY;
+    void main() {
+      // Inside of barrel — teal with light filtering through
+      vec3 innerColor = vec3(0.0, 0.55, 0.5);
+      vec3 lightColor = vec3(0.3, 1.0, 0.9);
+      // Light beam from the opening
+      float beam = pow(max(0.0, 1.0 - abs(vUv.x - 0.5) * 3.0), 2.0);
+      beam *= 0.5 + 0.5 * sin(uTime * 2.0 + vUv.y * 10.0);
+      vec3 color = mix(innerColor, lightColor, beam * 0.6);
+      float alpha = 0.5 + beam * 0.3;
+      gl_FragColor = vec4(color, alpha);
+    }
+  `,
+  transparent: true,
+  side: THREE.BackSide,
+});
+const barrel = new THREE.Mesh(barrelGeo, barrelMat);
+barrel.rotation.z = Math.PI / 2;
+barrel.position.set(0, 8, 0);
+waveGroup.add(barrel);
+
+// White water foam along the base
+const foamBaseGeo = new THREE.PlaneGeometry(80, 6, 40, 8);
+const foamBaseMat = new THREE.MeshLambertMaterial({
+  color: 0xffffff,
+  transparent: true,
+  opacity: 0.7,
+});
+const foamBase = new THREE.Mesh(foamBaseGeo, foamBaseMat);
+foamBase.rotation.x = -Math.PI / 2;
+foamBase.position.set(0, 0.05, 3);
+waveGroup.add(foamBase);
+
+// ─── SPRAY PARTICLES ────────────────────────────────────────────────────────
+const sprayCount = 300;
+const sprayPositions = new Float32Array(sprayCount * 3);
+const sprayVelocities = new Float32Array(sprayCount * 3);
 const sprayLife = new Float32Array(sprayCount);
-function resetSpray(i) {
-  sprayPos[i*3]=-28+(Math.random()-0.5)*4; sprayPos[i*3+1]=20+Math.random()*4; sprayPos[i*3+2]=-20+Math.random()*-100;
-  sprayVel[i*3]=0.05+Math.random()*0.07; sprayVel[i*3+1]=Math.random()*0.04-0.01; sprayVel[i*3+2]=(Math.random()-0.5)*0.05;
-  sprayLife[i]=Math.random();
-}
-for (let i=0; i<sprayCount; i++) resetSpray(i);
-sprayGeo.setAttribute('position', new THREE.BufferAttribute(sprayPos,3));
-const sprayMat = new THREE.PointsMaterial({ color:0xffffff, size:0.15, transparent:true, opacity:0.6, sizeAttenuation:true, depthWrite:false });
-scene.add(new THREE.Points(sprayGeo, sprayMat));
+const sprayGeo = new THREE.BufferGeometry();
+sprayGeo.setAttribute('position', new THREE.BufferAttribute(sprayPositions, 3));
+const sprayMat = new THREE.PointsMaterial({
+  color: 0xffffff, size: 0.15, transparent: true, opacity: 0.7,
+  sizeAttenuation: true,
+});
+const spray = new THREE.Points(sprayGeo, sprayMat);
+scene.add(spray);
 
-// Foam trail
-const foamCount = 100;
-const foamGeo = new THREE.BufferGeometry();
-const foamPos = new Float32Array(foamCount*3);
-const foamVel = new Float32Array(foamCount*3);
-const foamLife = new Float32Array(foamCount);
-function resetFoam(i, sx) {
-  foamPos[i*3]=sx+(Math.random()-0.5)*0.7; foamPos[i*3+1]=0.05; foamPos[i*3+2]=0.5+Math.random()*0.3;
-  foamVel[i*3]=(Math.random()-0.5)*0.03; foamVel[i*3+1]=0; foamVel[i*3+2]=0.06+Math.random()*0.05;
-  foamLife[i]=0.7+Math.random()*0.3;
+function resetSprayParticle(i, origin) {
+  const angle = Math.random() * Math.PI * 2;
+  const speed = 0.05 + Math.random() * 0.15;
+  sprayPositions[i*3] = origin.x + (Math.random()-0.5)*2;
+  sprayPositions[i*3+1] = origin.y + Math.random()*0.5;
+  sprayPositions[i*3+2] = origin.z + (Math.random()-0.5)*2;
+  sprayVelocities[i*3] = Math.cos(angle) * speed;
+  sprayVelocities[i*3+1] = 0.08 + Math.random()*0.12;
+  sprayVelocities[i*3+2] = Math.sin(angle) * speed;
+  sprayLife[i] = 0.5 + Math.random()*0.5;
 }
-for (let i=0; i<foamCount; i++) resetFoam(i,0);
-foamGeo.setAttribute('position', new THREE.BufferAttribute(foamPos,3));
-const foamMat = new THREE.PointsMaterial({ color:0xddf4ff, size:0.2, transparent:true, opacity:0.65, sizeAttenuation:true, depthWrite:false });
-scene.add(new THREE.Points(foamGeo, foamMat));
 
-// Surfer
+// Board wake particles
+const wakeCount = 80;
+const wakePositions = new Float32Array(wakeCount * 3);
+const wakeLife = new Float32Array(wakeCount);
+const wakeGeo = new THREE.BufferGeometry();
+wakeGeo.setAttribute('position', new THREE.BufferAttribute(wakePositions, 3));
+const wakeMat = new THREE.PointsMaterial({
+  color: 0xaaddff, size: 0.1, transparent: true, opacity: 0.5,
+  sizeAttenuation: true,
+});
+scene.add(new THREE.Points(wakeGeo, wakeMat));
+
+// Lip spray from wave
+const lipSprayCount = 150;
+const lipSprayPos = new Float32Array(lipSprayCount * 3);
+const lipSprayVel = new Float32Array(lipSprayCount * 3);
+const lipSprayLife = new Float32Array(lipSprayCount);
+const lipSprayGeo = new THREE.BufferGeometry();
+lipSprayGeo.setAttribute('position', new THREE.BufferAttribute(lipSprayPos, 3));
+const lipSprayMat = new THREE.PointsMaterial({
+  color: 0xffffff, size: 0.2, transparent: true, opacity: 0.85, sizeAttenuation: true
+});
+scene.add(new THREE.Points(lipSprayGeo, lipSprayMat));
+
+function resetLipSpray(i) {
+  const x = (Math.random()-0.5)*70;
+  lipSprayPos[i*3] = waveGroup.position.x;
+  lipSprayPos[i*3+1] = waveGroup.position.y + 11 + Math.random()*2;
+  lipSprayPos[i*3+2] = waveGroup.position.z + x;
+  lipSprayVel[i*3] = (Math.random()-0.3)*0.08;
+  lipSprayVel[i*3+1] = 0.04 + Math.random()*0.08;
+  lipSprayVel[i*3+2] = (Math.random()-0.5)*0.06;
+  lipSprayLife[i] = 0.3 + Math.random()*0.7;
+}
+for(let i=0;i<lipSprayCount;i++) resetLipSpray(i);
+
+// ─── SURFER ─────────────────────────────────────────────────────────────────
 const surferGroup = new THREE.Group();
-const dark = new THREE.MeshPhongMaterial({ color:0x1a2535, shininess:20 });
-const skin = new THREE.MeshPhongMaterial({ color:0xd4956a, shininess:10 });
-const boardM = new THREE.MeshPhongMaterial({ color:0xf0e8d8, specular:0x888888, shininess:80 });
-surferGroup.add(new THREE.Mesh(new THREE.BoxGeometry(0.38,0.055,2.1), boardM));
-const legL = new THREE.Mesh(new THREE.BoxGeometry(0.12,0.28,0.15), dark);
-legL.position.set(-0.1,0.2,0.25); legL.rotation.x=0.15; surferGroup.add(legL);
-const legR = new THREE.Mesh(new THREE.BoxGeometry(0.12,0.28,0.15), dark);
-legR.position.set(0.1,0.2,-0.15); legR.rotation.x=-0.1; surferGroup.add(legR);
-const torso = new THREE.Mesh(new THREE.BoxGeometry(0.28,0.36,0.2), dark);
-torso.position.set(0,0.52,0.05); torso.rotation.x=0.22; surferGroup.add(torso);
-const headM = new THREE.Mesh(new THREE.SphereGeometry(0.115,8,8), skin);
-headM.position.set(0,0.84,-0.02); surferGroup.add(headM);
-const arms = new THREE.Mesh(new THREE.BoxGeometry(0.38,0.08,0.1), dark);
-arms.position.set(0,0.58,0.08); surferGroup.add(arms);
-surferGroup.rotation.y = Math.PI;
 scene.add(surferGroup);
 
-// Lights
-scene.add(new THREE.AmbientLight(0x88aacc, 0.8));
-const sunLight = new THREE.DirectionalLight(0xfff4e0, 2.0);
-sunLight.position.set(80,120,40); scene.add(sunLight);
-const rimLight = new THREE.PointLight(0x00aaff, 1.5, 60);
-rimLight.position.set(-15,8,-10); scene.add(rimLight);
+// Board
+const boardGeo = new THREE.BoxGeometry(0.3, 0.08, 1.9);
+const boardMat = new THREE.MeshPhysicalMaterial({ color: 0xfff5e0, roughness: 0.2, metalness: 0.0 });
+const board = new THREE.Mesh(boardGeo, boardMat);
+board.castShadow = true;
+surferGroup.add(board);
 
-// Input — lean only, no tap needed to start
-let leanTarget=0, leanSmooth=0, touchStartX=null;
-const hintEl=document.getElementById('hint');
-const scoreEl=document.getElementById('score');
-const timerEl=document.getElementById('timer');
-
-renderer.domElement.addEventListener('touchstart', e=>{
-  e.preventDefault();
-  touchStartX=e.touches[0].clientX;
-},{passive:false});
-renderer.domElement.addEventListener('touchmove', e=>{
-  e.preventDefault();
-  if(touchStartX===null)return;
-  leanTarget=Math.max(-1,Math.min(1,(e.touches[0].clientX-touchStartX)/120));
-},{passive:false});
-renderer.domElement.addEventListener('touchend', e=>{
-  e.preventDefault();
-  touchStartX=null; leanTarget=0;
-},{passive:false});
-renderer.domElement.addEventListener('mousemove', e=>{
-  leanTarget=Math.max(-1,Math.min(1,(e.clientX-window.innerWidth/2)/(window.innerWidth/3)));
-});
-window.addEventListener('deviceorientation', e=>{
-  if(e.gamma===null)return;
-  leanTarget=Math.max(-1,Math.min(1,e.gamma/25));
-});
-window.addEventListener('resize', ()=>{
-  camera.aspect=window.innerWidth/window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth,window.innerHeight);
+// Board fins
+const finGeo = new THREE.BoxGeometry(0.04, 0.18, 0.22);
+const finMat = new THREE.MeshLambertMaterial({ color: 0xddccaa });
+[-0.08, 0, 0.08].forEach(ox => {
+  const fin = new THREE.Mesh(finGeo, finMat);
+  fin.position.set(ox, -0.12, -0.7);
+  surferGroup.add(fin);
 });
 
-// Game state — auto-starts immediately, no tap needed
-let elapsed=0, score=0, last=performance.now(), hintFaded=false;
-let surferFaceY=3.5, surferFaceVY=0, waveSpeed=18;
+// Wetsuit body parts
+const bodyMat = new THREE.MeshPhysicalMaterial({ color: 0x111133, roughness: 0.6, metalness: 0.1 });
+const skinMat = new THREE.MeshLambertMaterial({ color: 0xc68642 });
+const whiteMat = new THREE.MeshLambertMaterial({ color: 0xeeeeee });
 
+// Torso
+const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 0.42, 8),
+  bodyMat);
+torso.position.set(0, 0.55, 0.0);
+torso.castShadow = true;
+surferGroup.add(torso);
+
+// Wetsuit stripe
+const stripeGeo = new THREE.CylinderGeometry(0.145, 0.145, 0.1, 8);
+const stripeMat = new THREE.MeshLambertMaterial({ color: 0x0055ff });
+const stripe = new THREE.Mesh(stripeGeo, stripeMat);
+stripe.position.set(0, 0.62, 0.0);
+surferGroup.add(stripe);
+
+// Head
+const head = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), skinMat);
+head.position.set(0, 0.96, 0.0);
+head.castShadow = true;
+surferGroup.add(head);
+
+// Hair
+const hair = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 6, 0, Math.PI*2, 0, Math.PI*0.5), 
+  new THREE.MeshLambertMaterial({ color: 0x3d2b1f }));
+hair.position.set(0, 0.97, 0.0);
+surferGroup.add(hair);
+
+// Arms group (for animation)
+const armsGroup = new THREE.Group();
+surferGroup.add(armsGroup);
+
+// Left arm
+const leftArm = new THREE.Group();
+leftArm.position.set(-0.18, 0.74, 0);
+const leftUpper = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.05, 0.28, 6), bodyMat);
+leftUpper.rotation.z = Math.PI * 0.35;
+leftArm.add(leftUpper);
+const leftHand = new THREE.Mesh(new THREE.SphereGeometry(0.055, 6, 6), skinMat);
+leftHand.position.set(-0.16, -0.1, 0);
+leftArm.add(leftHand);
+armsGroup.add(leftArm);
+
+// Right arm
+const rightArm = new THREE.Group();
+rightArm.position.set(0.18, 0.74, 0);
+const rightUpper = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.05, 0.28, 6), bodyMat);
+rightUpper.rotation.z = -Math.PI * 0.35;
+rightArm.add(rightUpper);
+const rightHand = new THREE.Mesh(new THREE.SphereGeometry(0.055, 6, 6), skinMat);
+rightHand.position.set(0.16, -0.1, 0);
+rightArm.add(rightHand);
+armsGroup.add(rightArm);
+
+// Left leg
+const leftLeg = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.06, 0.35, 6), bodyMat);
+leftLeg.position.set(-0.08, 0.22, 0.05);
+leftLeg.rotation.z = 0.1;
+surferGroup.add(leftLeg);
+
+// Right leg
+const rightLeg = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.06, 0.35, 6), bodyMat);
+rightLeg.position.set(0.08, 0.22, -0.05);
+rightLeg.rotation.z = -0.1;
+surferGroup.add(rightLeg);
+
+// Feet / booties
+const bootMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
+const leftBoot = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.07, 0.22), bootMat);
+leftBoot.position.set(-0.08, 0.06, 0.07);
+surferGroup.add(leftBoot);
+const rightBoot = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.07, 0.22), bootMat);
+rightBoot.position.set(0.08, 0.06, -0.07);
+surferGroup.add(rightBoot);
+
+// Board leash
+const leashMat = new THREE.LineBasicMaterial({ color: 0x333333 });
+
+// ─── BACKGROUND SWELLS ───────────────────────────────────────────────────────
+// Distant rolling swells for depth
+for(let i=0; i<5; i++) {
+  const swellGeo = new THREE.PlaneGeometry(200, 8, 30, 6);
+  const swellMat = new THREE.MeshLambertMaterial({ 
+    color: new THREE.Color(0x0055aa),
+    transparent: true, opacity: 0.6
+  });
+  const swell = new THREE.Mesh(swellGeo, swellMat);
+  swell.rotation.x = -Math.PI/2;
+  swell.position.set(0, 0.5 + i*0.3, -80 - i*30);
+  swell.userData = { baseZ: -80 - i*30, speed: 0.08 + i*0.02, index: i };
+  scene.add(swell);
+}
+
+// ─── INPUT ──────────────────────────────────────────────────────────────────
+let leanTarget = 0, leanSmooth = 0;
+let touchStartX = null, touchStartY = null;
+let currentTouchX = null;
+let isInBarrel = false;
+
+renderer.domElement.addEventListener('touchstart', e => {
+  e.preventDefault();
+  touchStartX = e.touches[0].clientX;
+  touchStartY = e.touches[0].clientY;
+  currentTouchX = touchStartX;
+}, { passive: false });
+
+renderer.domElement.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if(touchStartX === null) return;
+  currentTouchX = e.touches[0].clientX;
+  const dx = currentTouchX - touchStartX;
+  leanTarget = Math.max(-1, Math.min(1, dx / 100));
+}, { passive: false });
+
+renderer.domElement.addEventListener('touchend', e => {
+  e.preventDefault();
+  touchStartX = null;
+  leanTarget = 0;
+}, { passive: false });
+
+// ─── GAME STATE ─────────────────────────────────────────────────────────────
+let elapsed = 0, score = 0, last = performance.now();
+let hintFaded = false;
+let barrelTime = 0;
+let surferVY = 0, surferY = 1.2;
+let surferZ = 0; // position along wave face
+let waveSpeed = 12;
+let comboCount = 0;
+
+const scoreEl = document.getElementById('score');
+const timerEl = document.getElementById('timer');
+const comboEl = document.getElementById('combo');
+const hintEl = document.getElementById('hint');
+const barrelFlash = document.getElementById('barrel-flash');
+const barrelIndicator = document.getElementById('barrel-indicator');
+
+// Camera state
+let camTargetX = 0, camTargetY = 3.5, camTargetZ = 10;
+let camX = 0, camY = 3.5, camZ = 10;
+let camLookX = 0, camLookY = 1, camLookZ = -20;
+
+// Initialize spray
+for(let i=0; i<sprayCount; i++) {
+  resetSprayParticle(i, { x:0, y:0.5, z:0 });
+  sprayLife[i] = Math.random();
+}
+for(let i=0; i<wakeCount; i++) wakeLife[i] = 0;
+
+// ─── ANIMATE ────────────────────────────────────────────────────────────────
 function animate() {
   requestAnimationFrame(animate);
-  const now=performance.now();
-  const dt=Math.min((now-last)/1000,0.05);
-  last=now;
-  elapsed+=dt;
 
-  score+=dt*10+Math.abs(leanSmooth)*dt*30;
-  scoreEl.textContent=Math.floor(score);
-  timerEl.textContent=Math.floor(elapsed/60)+':'+Math.floor(elapsed%60).toString().padStart(2,'0');
+  const now = performance.now();
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  elapsed += dt;
 
-  if(elapsed>6&&!hintFaded){hintEl.style.opacity='0';hintFaded=true;}
-  waveSpeed=18+elapsed*0.015;
+  // Scoring
+  score += dt * 15 + Math.abs(leanSmooth) * dt * 40;
+  if(isInBarrel) score += dt * 80; // big bonus for barrel riding
+  scoreEl.textContent = Math.floor(score);
+  timerEl.textContent = Math.floor(elapsed/60)+':'+Math.floor(elapsed%60).toString().padStart(2,'0');
 
-  leanSmooth+=(leanTarget-leanSmooth)*0.07;
+  // Hide hint
+  if(elapsed > 5 && !hintFaded) { hintEl.style.opacity='0'; hintFaded=true; }
 
-  surferFaceVY+=(-4+-leanSmooth*12)*dt;
-  surferFaceVY*=0.92;
-  surferFaceY+=surferFaceVY*dt;
-  if(surferFaceY>8){surferFaceY=8;surferFaceVY*=-0.3;}
-  if(surferFaceY<0.3){surferFaceY=0.3;surferFaceVY*=-0.3;}
+  // Wave speed gradually increases
+  waveSpeed = 12 + elapsed * 0.012;
 
-  const sx=leanSmooth*1.5;
-  const sy=surferFaceY*0.28;
-  const bob=Math.sin(elapsed*1.8)*0.04+Math.sin(elapsed*2.9)*0.02;
+  // ── Surfer physics ──────────────────────────────────────────────────────
+  leanSmooth += (leanTarget - leanSmooth) * 0.08;
 
-  surferGroup.position.set(sx,sy+bob+0.03,0);
-  surferGroup.rotation.z=leanSmooth*0.22;
-  surferGroup.rotation.x=-surferFaceVY*0.03+0.05;
-  arms.rotation.z=leanSmooth*0.35;
-  headM.rotation.y=leanSmooth*0.2;
+  // Gravity pulls surfer down wave face, lean controls lateral position
+  surferVY += (-3.5 - leanSmooth * 10) * dt;
+  surferVY *= 0.91;
+  surferY += surferVY * dt;
 
-  // Ocean
-  const oPos=oceanGeo.attributes.position.array;
-  for(let i=0;i<oPos.length;i+=3){
-    const ox=oceanBase[i],oz=oceanBase[i+2];
-    oPos[i+1]=Math.sin(ox*0.08+elapsed*1.1)*0.5+Math.sin(oz*0.05+elapsed*0.8)*0.8+Math.sin(ox*0.15-oz*0.07+elapsed*1.4)*0.3;
+  // Surfer rides up and down the wave face
+  if(surferY > 7.5) { surferY = 7.5; surferVY *= -0.4; }
+  if(surferY < 0.3) { surferY = 0.3; surferVY *= -0.3; }
+
+  // Lateral drift along wave (Z axis)
+  surferZ += leanSmooth * 6 * dt;
+  surferZ = Math.max(-25, Math.min(25, surferZ));
+
+  // Bob on ocean surface
+  const bob = Math.sin(elapsed*1.8)*0.06 + Math.sin(elapsed*2.7)*0.03;
+
+  // Position surfer on wave face
+  const sx = leanSmooth * 1.2;
+  const sy = surferY * 0.32 + bob;
+  surferGroup.position.set(
+    waveGroup.position.x + 2 + sx,
+    sy,
+    waveGroup.position.z + surferZ
+  );
+  surferGroup.rotation.z = leanSmooth * 0.28;
+  surferGroup.rotation.x = -surferVY * 0.025 + 0.08;
+  surferGroup.rotation.y = leanSmooth * 0.15;
+
+  // Arm animation — arms out for balance
+  armsGroup.rotation.z = leanSmooth * 0.4;
+  leftArm.rotation.z = Math.PI*0.3 + leanSmooth * 0.3;
+  rightArm.rotation.z = -(Math.PI*0.3 + leanSmooth * 0.3);
+  leftArm.rotation.x = Math.sin(elapsed*1.2) * 0.1;
+  rightArm.rotation.x = -Math.sin(elapsed*1.2) * 0.1;
+
+  // Head looks in direction of travel
+  head.rotation.y = leanSmooth * 0.3;
+
+  // ── Barrel detection ────────────────────────────────────────────────────
+  // Player is "in the barrel" when surfer is high on the wave and close to it
+  const distToWave = Math.abs(surferGroup.position.x - waveGroup.position.x);
+  const heightFactor = surferY / 7.5;
+  isInBarrel = (distToWave < 5 && surferY > 3.5);
+
+  if(isInBarrel) {
+    barrelTime += dt;
+    barrelFlash.style.opacity = '1';
+    barrelIndicator.style.color = 'rgba(0,220,255,0.9)';
+    comboEl.textContent = `🌊 BARREL ${Math.floor(barrelTime*10)/10}s`;
+  } else {
+    barrelTime = 0;
+    barrelFlash.style.opacity = '0';
+    barrelIndicator.style.color = 'rgba(255,255,255,0)';
+    if(Math.abs(leanSmooth) > 0.5) {
+      comboEl.textContent = `CARVE`;
+    } else {
+      comboEl.textContent = '';
+    }
   }
-  oceanGeo.attributes.position.needsUpdate=true;
-  oceanGeo.computeVertexNormals();
 
-  // Wave face
-  const wPos=waveGeo.attributes.position.array;
-  for(let i=0;i<wPos.length;i+=3){
-    const oz=waveBase[i+2];
-    wPos[i+1]=waveBase[i+1]+Math.sin(oz*0.12+elapsed*2.2)*0.35+Math.sin(oz*0.07-elapsed*1.5)*0.2;
+  // ── Wave animation ───────────────────────────────────────────────────────
+  const waveT = elapsed;
+  waveFaceMat.uniforms.uTime.value = waveT;
+  barrelMat.uniforms.uTime.value = waveT;
+
+  // Animate lip curl
+  lip.rotation.x = Math.sin(waveT*0.9)*0.12;
+  lip.position.y = 11.5 + Math.sin(waveT*1.1)*0.4;
+  lip.scale.x = 1.0 + Math.sin(waveT*0.7)*0.08;
+
+  // Foam base opacity pulses
+  foamBaseMat.opacity = 0.5 + Math.sin(waveT*2)*0.2;
+
+  // ── Ocean shader update ──────────────────────────────────────────────────
+  gerstnerUniforms.uTime.value = elapsed * 0.5;
+  gerstnerUniforms.uCameraPos.value.copy(camera.position);
+  skyMat.uniforms.uTime.value = elapsed;
+
+  // Slowly shift ocean color with time of day
+  const dayProgress = (Math.sin(elapsed * 0.01) + 1) * 0.5;
+  gerstnerUniforms.uDeepColor.value.setRGB(
+    0.0 + dayProgress*0.05,
+    0.15 + dayProgress*0.1,
+    0.35 + dayProgress*0.1
+  );
+
+  // ── Spray particles ──────────────────────────────────────────────────────
+  const surferPos = surferGroup.position;
+
+  for(let i=0; i<sprayCount; i++) {
+    sprayLife[i] -= dt * 0.8;
+    if(sprayLife[i] <= 0) {
+      resetSprayParticle(i, surferPos);
+      continue;
+    }
+    sprayPositions[i*3] += sprayVelocities[i*3];
+    sprayPositions[i*3+1] += sprayVelocities[i*3+1];
+    sprayVelocities[i*3+1] -= 0.003; // gravity
+    sprayPositions[i*3+2] += sprayVelocities[i*3+2];
   }
-  waveGeo.attributes.position.needsUpdate=true;
-  waveGeo.computeVertexNormals();
+  sprayGeo.attributes.position.needsUpdate = true;
+  sprayMat.opacity = 0.4 + Math.abs(leanSmooth) * 0.4;
 
-  lipMesh.rotation.y=Math.sin(elapsed*0.9)*0.18;
-  lipMesh.position.y=22+Math.sin(elapsed*1.1)*0.9;
-
-  // Camera
-  camera.position.x+=(sx*0.3-camera.position.x)*0.05;
-  camera.position.y+=((2.5+sy*0.6)-camera.position.y)*0.04;
-  camera.position.y+=Math.sin(elapsed*1.8)*0.06;
-  camera.rotation.z+=(-leanSmooth*0.04-camera.rotation.z)*0.08;
-  camera.lookAt(new THREE.Vector3(sx*0.5-4,sy*0.3,-25));
-
-  rimLight.intensity=1.5+Math.sin(elapsed*0.7)*0.5;
-  rimLight.position.y=8+Math.sin(elapsed*1.1)*2;
-
-  // Foam
-  const fPos=foamGeo.attributes.position.array;
-  for(let i=0;i<foamCount;i++){
-    foamLife[i]-=dt*0.9;
-    if(foamLife[i]<=0){resetFoam(i,sx);continue;}
-    fPos[i*3]+=foamVel[i*3];fPos[i*3+1]+=foamVel[i*3+1];fPos[i*3+2]+=foamVel[i*3+2];
+  // Lip spray
+  for(let i=0; i<lipSprayCount; i++) {
+    lipSprayLife[i] -= dt;
+    if(lipSprayLife[i] <= 0) { resetLipSpray(i); continue; }
+    lipSprayPos[i*3] += lipSprayVel[i*3];
+    lipSprayPos[i*3+1] += lipSprayVel[i*3+1];
+    lipSprayVel[i*3+1] -= 0.002;
+    lipSprayPos[i*3+2] += lipSprayVel[i*3+2];
   }
-  foamGeo.attributes.position.needsUpdate=true;
-  foamMat.opacity=0.5+Math.abs(leanSmooth)*0.3;
+  lipSprayGeo.attributes.position.needsUpdate = true;
 
-  // Spray
-  const sPos=sprayGeo.attributes.position.array;
-  for(let i=0;i<sprayCount;i++){
-    sprayLife[i]-=dt*0.5;
-    if(sprayLife[i]<=0){resetSpray(i);continue;}
-    sPos[i*3]+=sprayVel[i*3];sPos[i*3+1]+=sprayVel[i*3+1]-dt*0.05;sPos[i*3+2]+=sprayVel[i*3+2];
+  // Wake trail behind board
+  for(let i=0; i<wakeCount; i++) {
+    wakeLife[i] -= dt;
+    if(wakeLife[i] <= 0) {
+      wakePositions[i*3] = surferPos.x + (Math.random()-0.5)*0.3;
+      wakePositions[i*3+1] = 0.05;
+      wakePositions[i*3+2] = surferPos.z - 0.5 + (Math.random()-0.5)*0.5;
+      wakeLife[i] = 0.5 + Math.random()*0.3;
+    }
+    wakePositions[i*3+2] += leanSmooth * 0.02;
   }
-  sprayGeo.attributes.position.needsUpdate=true;
+  wakeGeo.attributes.position.needsUpdate = true;
 
-  const dp=(Math.sin(elapsed*0.015)+1)*0.5;
-  oceanMat.color.setRGB(0+dp*0.05,0.45+dp*0.1,0.6+dp*0.15);
-  waveMat.color.setRGB(0,0.55+dp*0.1,0.75+dp*0.1);
+  // ── Camera — over-the-shoulder with barrel dive ──────────────────────────
+  let targetCamOffX, targetCamOffY, targetCamOffZ;
+  let targetLookX, targetLookY, targetLookZ;
 
-  renderer.render(scene,camera);
+  if(isInBarrel) {
+    // Barrel cam — tight over shoulder, looking into tube
+    targetCamOffX = 3.5 + leanSmooth * 0.5;
+    targetCamOffY = 1.4;
+    targetCamOffZ = 1.2;
+    targetLookX = surferPos.x - 8;
+    targetLookY = surferPos.y + 1.5;
+    targetLookZ = surferPos.z + leanSmooth * 2;
+    sunLight.intensity = 0.6; // darker inside barrel
+    rimLight.intensity = 2.5; // teal rim glow inside barrel
+  } else {
+    // Normal over-shoulder cam
+    targetCamOffX = 4.5 + leanSmooth * 1.0;
+    targetCamOffY = 1.8 + surferY * 0.15;
+    targetCamOffZ = 3.5;
+    targetLookX = surferPos.x - 6;
+    targetLookY = surferPos.y + 0.8;
+    targetLookZ = surferPos.z + leanSmooth * 3;
+    sunLight.intensity = 2.0;
+    rimLight.intensity = 1.2 + Math.sin(elapsed*0.7)*0.3;
+  }
+
+  // Smooth camera movement
+  const camLerpSpeed = isInBarrel ? 0.04 : 0.06;
+  camX += (surferPos.x + targetCamOffX - camX) * camLerpSpeed;
+  camY += (surferPos.y + targetCamOffY - camY) * camLerpSpeed;
+  camZ += (surferPos.z + targetCamOffZ - camZ) * camLerpSpeed;
+
+  camLookX += (targetLookX - camLookX) * 0.06;
+  camLookY += (targetLookY - camLookY) * 0.06;
+  camLookZ += (targetLookZ - camLookZ) * 0.06;
+
+  camera.position.set(camX, camY, camZ);
+  camera.lookAt(camLookX, camLookY, camLookZ);
+
+  // Camera roll with lean — very immersive
+  camera.rotation.z += (-leanSmooth * 0.06 - camera.rotation.z) * 0.08;
+
+  // ── Rim light animation ──────────────────────────────────────────────────
+  rimLight.position.y = 8 + Math.sin(elapsed*1.1)*2;
+
+  renderer.render(scene, camera);
 }
+
 animate();
 </script>
 </body>
